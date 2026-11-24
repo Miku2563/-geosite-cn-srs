@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         YouTube CDN Auto Switch (experimental)
+// @name         YouTube CDN Auto Switch (metaAi)
 // @description  Switch googlevideo node automatically when download speed is slow
 // @namespace    http://tampermonkey.net/
 // @version      0.2.0
@@ -12,10 +12,8 @@
 // @inject-into  page
 // @license      MIT
 // ==/UserScript==
-
 (function () {
   'use strict';
-
   const CFG = {
     minBytes: 256 * 1024,   // 小于该大小的响应不参与测速
     slowMbps: 18,           // 低于该速度算慢
@@ -25,14 +23,11 @@
     toastMs: 3500,          // 提示显示时长
     debug: true,
   };
-
   const TAG = '[yt-cdn-switch]';
   const log = (...a) => CFG.debug && console.log(TAG, ...a);
-
   // ---------- 提示 Toast ----------
   let toastEl = null;
   let toastTimer = 0;
-
   function ensureToast() {
     if (toastEl) return toastEl;
     toastEl = document.createElement('div');
@@ -57,7 +52,6 @@
     ].join(';'));
     return toastEl;
   }
-
   function showToast(msg, type = 'info') {
     if (!CFG.toast) return;
     const render = () => {
@@ -66,15 +60,12 @@
       const parent = document.fullscreenElement || document.documentElement;
       if (!parent) return;
       if (el.parentNode !== parent) parent.appendChild(el);
-
       el.textContent = msg;   // 不用 innerHTML,避免 Trusted Types 报错
       el.style.borderLeft = '4px solid ' + (type === 'warn' ? '#f5a623' : '#3ea6ff');
-
       // 触发过渡动画
       void el.offsetWidth;
       el.style.opacity = '1';
       el.style.transform = 'translateY(0)';
-
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         el.style.opacity = '0';
@@ -84,9 +75,7 @@
     if (document.documentElement) render();
     else document.addEventListener('DOMContentLoaded', render, { once: true });
   }
-
   const shortNode = n => n.replace(/^sn-/, '');
-
   const stats = new Map();   // node -> { ewma, n }
   const bad = new Set();     // 失败过的节点
   let forced = null;         // 当前强制使用的节点
@@ -94,7 +83,6 @@
   let slowStreak = 0;
   let lastSwitch = 0;
   let lastNodes = [];        // 最近一个 URL 的候选节点
-
   // ---------- URL 解析 ----------
   function inspect(urlStr) {
     let u;
@@ -106,7 +94,6 @@
     const nodes = [...new Set([m[2], ...mn])];
     return { u, prefix: m[1], node: m[2], nodes };
   }
-
   // ---------- 选择下一个节点 ----------
   function pickNext(current, nodes) {
     const cands = nodes.filter(n => !bad.has(n));
@@ -119,7 +106,6 @@
     }
     return best;
   }
-
   // ---------- 测速结果处理 ----------
   function onSample(node, mbps) {
     const s = stats.get(node) || { ewma: mbps, n: 0 };
@@ -127,9 +113,7 @@
     s.n++;
     stats.set(node, s);
     log(node, mbps.toFixed(2) + ' Mbps', '(avg ' + s.ewma.toFixed(2) + ')');
-
     if (node !== active) return;   // 忽略切换前遗留请求的结果
-
     slowStreak = mbps < CFG.slowMbps ? slowStreak + 1 : 0;
     if (slowStreak >= CFG.slowCount && Date.now() - lastSwitch > CFG.cooldownMs) {
       const next = pickNext(node, lastNodes);
@@ -144,26 +128,32 @@
       }
     }
   }
-
+  // ---------- 测速: TransformStream 透传计数, O(1)内存 ----------
   function measure(resp, t0, node) {
-    if (!resp.body) return;
-    let reader;
-    try { reader = resp.clone().body.getReader(); } catch { return; }
-    (async () => {
+    if (!resp.body) return resp;
+    try {
       let bytes = 0;
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          bytes += value.byteLength;
+      let lastT = t0;
+      const ts = new TransformStream({
+        transform(chunk, controller) {
+          bytes += chunk.byteLength >>> 0;
+          lastT = performance.now();
+          controller.enqueue(chunk);
+        },
+        flush() {
+          if (bytes < CFG.minBytes) return;
+          const sec = (lastT - t0) / 1000;
+          if (sec > 0) onSample(node, (bytes * 8) / sec / 1e6);
         }
-      } catch { return; }
-      if (bytes < CFG.minBytes) return;
-      const sec = (performance.now() - t0) / 1000;
-      if (sec > 0) onSample(node, (bytes * 8) / sec / 1e6);
-    })();
+      });
+      const newBody = resp.body.pipeThrough(ts);
+      return new Response(newBody, {
+        status: resp.status,
+        statusText: resp.statusText,
+        headers: resp.headers
+      });
+    } catch { return resp; }
   }
-
   // ---------- 构造改写后的请求参数 ----------
   async function rebuild(input, init, newUrl) {
     if (!(input instanceof Request)) return [newUrl, init];
@@ -177,7 +167,6 @@
     });
     return [req];
   }
-
   // ---------- Hook fetch ----------
   const origFetch = window.fetch;
   window.fetch = new Proxy(origFetch, {
@@ -188,12 +177,10 @@
         : input && input.url;
       const info = urlStr && inspect(urlStr);
       if (!info) return Reflect.apply(target, thisArg, args);
-
       lastNodes = info.nodes;
       let callArgs = args;
       let node = info.node;
       let rewritten = false;
-
       if (forced && forced !== info.node && info.nodes.includes(forced) && !bad.has(forced)) {
         try {
           info.u.hostname = `${info.prefix}---${forced}.googlevideo.com`;
@@ -204,13 +191,12 @@
           callArgs = args;
         }
       }
-
       active = node;
       const t0 = performance.now();
       try {
         const resp = await Reflect.apply(target, thisArg, callArgs);
         if (rewritten && resp.status >= 400) throw new Error('HTTP ' + resp.status);
-        if (resp.ok) measure(resp, t0, node);
+        if (resp.ok) return measure(resp, t0, node);
         return resp;
       } catch (e) {
         if (e && e.name === 'AbortError') throw e;
@@ -229,13 +215,11 @@
       }
     },
   });
-
   // 调试:控制台输入 ytCdnStats() 查看各节点速度
   window.ytCdnStats = () => ({
     forced, active,
     bad: [...bad],
     stats: Object.fromEntries(stats),
   });
-
   log('installed');
 })();
